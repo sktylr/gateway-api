@@ -32,6 +32,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/quic-go/quic-go/http3"
 	"golang.org/x/net/http2"
 
 	"sigs.k8s.io/gateway-api/conformance/utils/config"
@@ -40,6 +41,7 @@ import (
 
 const (
 	H2CPriorKnowledgeProtocol = "H2C_PRIOR_KNOWLEDGE"
+	H3Protocol                = "H3_PROTOCOL"
 )
 
 // RoundTripper is an interface used to make requests within conformance tests.
@@ -166,6 +168,23 @@ func (d *DefaultRoundTripper) h2cPriorKnowledgeTransport(request Request) (http.
 	return transport, nil
 }
 
+func (d *DefaultRoundTripper) h3Transport(request Request) (http.RoundTripper, error) {
+	if request.Server == "" || len(request.CertPem) == 0 || len(request.KeyPem) == 0 {
+		return nil, errors.New("request does not have configured cert or key but h3 requires encryption")
+	}
+
+	tlsConfig, err := tlsClientConfig(request.Server, request.CertPem, request.KeyPem)
+	if err != nil {
+		return nil, err
+	}
+
+	transport := &http3.Transport{
+		TLSClientConfig: tlsConfig,
+	}
+
+	return transport, nil
+}
+
 // CaptureRoundTrip makes a request with the provided parameters and returns the
 // captured request and response from echoserver. An error will be returned if
 // there is an error running the function but not if an HTTP error status code
@@ -177,6 +196,8 @@ func (d *DefaultRoundTripper) CaptureRoundTrip(request Request) (*CapturedReques
 	switch request.Protocol {
 	case H2CPriorKnowledgeProtocol:
 		transport, err = d.h2cPriorKnowledgeTransport(request)
+	case H3Protocol:
+		transport, err = d.h3Transport(request)
 	default:
 		transport, err = d.httpTransport(request)
 	}
