@@ -35,6 +35,8 @@ import (
 	"golang.org/x/net/websocket"
 
 	g "sigs.k8s.io/gateway-api/conformance/echo-basic/grpc"
+
+	"github.com/quic-go/quic-go/http3"
 )
 
 // RequestAssertions contains information about the request and the Ingress
@@ -130,9 +132,22 @@ func main() {
 
 	// Enable HTTPS if certificate and private key are given.
 	if os.Getenv("TLS_SERVER_CERT") != "" && os.Getenv("TLS_SERVER_PRIVKEY") != "" {
+		tlsConfig, err := buildTLSConfig(os.Getenv("TLS_CLIENT_CACERTS"))
+		if err != nil {
+			errchan <- err
+		}
+
 		go func() {
 			fmt.Printf("Starting server, listening on port %s (https)\n", httpsPort)
-			err := listenAndServeTLS(fmt.Sprintf(":%s", httpsPort), os.Getenv("TLS_SERVER_CERT"), os.Getenv("TLS_SERVER_PRIVKEY"), os.Getenv("TLS_CLIENT_CACERTS"), httpHandler)
+			err := listenAndServeTLS(fmt.Sprintf(":%s", httpsPort), os.Getenv("TLS_SERVER_CERT"), os.Getenv("TLS_SERVER_PRIVKEY"), tlsConfig, httpHandler)
+			if err != nil {
+				errchan <- err
+			}
+		}()
+
+		go func() {
+			fmt.Printf("Starting server, listening on port %s (http3)\n", httpsPort)
+			err := listenAndServeHTTP3(fmt.Sprintf(":%s", httpsPort), os.Getenv("TLS_SERVER_CERT"), os.Getenv("TLS_SERVER_PRIVKEY"), tlsConfig, httpHandler)
 			if err != nil {
 				errchan <- err
 			}
@@ -272,19 +287,18 @@ func processError(w http.ResponseWriter, err error, code int) { //nolint:unparam
 	_, _ = w.Write(body)
 }
 
-func listenAndServeTLS(addr string, serverCert string, serverPrivKey string, clientCA string, handler http.Handler) error {
+func buildTLSConfig(clientCA string) (*tls.Config, error) {
 	var config tls.Config
 
-	// Optionally enable client certificate validation when client CA certificates are given.
 	if clientCA != "" {
 		ca, err := os.ReadFile(clientCA)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		certPool := x509.NewCertPool()
 		if ok := certPool.AppendCertsFromPEM(ca); !ok {
-			return fmt.Errorf("unable to append certificate in %q to CA pool", clientCA)
+			return nil, fmt.Errorf("unable to append certificate in %q to CA pool", clientCA)
 		}
 
 		// Verify certificate against given CA but also allow unauthenticated connections.
@@ -292,10 +306,24 @@ func listenAndServeTLS(addr string, serverCert string, serverPrivKey string, cli
 		config.ClientCAs = certPool
 	}
 
+	return &config, nil
+}
+
+func listenAndServeTLS(addr string, serverCert string, serverPrivKey string, config *tls.Config, handler http.Handler) error {
 	srv := &http.Server{ //nolint:gosec
 		Addr:      addr,
 		Handler:   handler,
-		TLSConfig: &config,
+		TLSConfig: config,
+	}
+
+	return srv.ListenAndServeTLS(serverCert, serverPrivKey)
+}
+
+func listenAndServeHTTP3(addr string, serverCert string, serverPrivKey string, config *tls.Config, handler http.Handler) error {
+	srv := &http3.Server{
+		Addr:      addr,
+		TLSConfig: config,
+		Handler:   handler,
 	}
 
 	return srv.ListenAndServeTLS(serverCert, serverPrivKey)
